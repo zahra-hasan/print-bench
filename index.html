@@ -109,6 +109,17 @@ body.busy .bar,body.busy .panel{pointer-events:none}
 .brushes .btn{flex-direction:column;gap:5px;min-height:62px;padding:6px}
 .brushes .btn svg{width:24px;height:24px}
 .brushes .btn span{font-size:13.5px}
+.parts{list-style:none;margin:0;padding:0;display:grid;gap:4px;max-height:260px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.parts li.more{font-size:13px;color:var(--muted);padding:4px 2px}
+.parts button{width:100%;display:grid;grid-template-columns:20px minmax(0,1fr);gap:2px 10px;align-items:center;text-align:left;min-height:46px;padding:7px 10px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:500 14.5px var(--f-body);cursor:pointer;touch-action:manipulation}
+.parts button[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft)}
+.parts .box{grid-row:1 / span 2;width:20px;height:20px;border-radius:6px;border:2px solid var(--line);display:grid;place-items:center;color:var(--accent-ink)}
+.parts button[aria-pressed="true"] .box{background:var(--accent);border-color:var(--accent)}
+.parts .box svg{width:14px;height:14px;opacity:0}
+.parts button[aria-pressed="true"] .box svg{opacity:1}
+.parts small{font:12px var(--f-mono);color:var(--muted);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.btn.danger-solid{background:var(--warn);border-color:var(--warn);color:#fff}
+.btn.danger-solid:hover{background:var(--warn);filter:brightness(.92)}
 kbd{font:12px var(--f-mono);padding:1px 5px;border:1px solid var(--line);border-radius:4px}
 .tabs{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px;padding-block:10px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));border-bottom:1px solid var(--line)}
 .tab{position:relative;appearance:none;border:0;background:transparent;color:var(--muted);font:600 14px/1 var(--f-body);padding:0 2px;min-height:42px;border-radius:9px;cursor:pointer;touch-action:manipulation}
@@ -297,6 +308,7 @@ button.file-chip:hover{background:var(--sunken)}
           <button class="btn" data-brush="inflate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/></svg><span>Inflate</span></button>
           <button class="btn" data-brush="smooth"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10l3-3 3 4 3-5 3 5 3-3 3 3" opacity=".4"/><path d="M3 17c4-3 14-3 18 0"/></svg><span>Smooth</span></button>
           <button class="btn" data-brush="flatten"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 15c3-5 6 2 9-3s6 0 9-2" opacity=".4"/><path d="M3 18h18"/><path d="M12 4v7M9 8l3 3 3-3"/></svg><span>Flatten</span></button>
+          <button class="btn" data-brush="erase"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20h11"/><path d="M4.6 15.4 13.5 6.5l5 5-8.6 8.5H7.2z"/><path d="m9 11 5 5"/></svg><span>Erase</span></button>
         </div>
         <p class="hint" id="brushHint"></p>
       </section>
@@ -339,6 +351,22 @@ button.file-chip:hover{background:var(--sunken)}
     </div>
 
     <div class="pane" data-pane="modify" hidden>
+      <section class="group">
+        <h3>Separate parts <output id="partsOut">1</output></h3>
+        <p class="hint" id="partsHint"></p>
+        <div class="group" id="partsTools" style="padding:0;border:0">
+          <ul class="parts" id="partsList"></ul>
+          <div class="seg">
+            <button class="btn small" id="selSmall">Select small bits</button>
+            <button class="btn small" id="selAll">Select all</button>
+            <button class="btn small" id="selNone">Clear</button>
+          </div>
+          <div class="seg">
+            <button class="btn danger-solid" id="delParts">Delete selected</button>
+            <button class="btn" id="keepParts">Keep only selected</button>
+          </div>
+        </div>
+      </section>
       <section class="group">
         <h3>Cut flat <output id="cutOut">0.0 mm</output></h3>
         <p class="hint">Slices the model at a height and caps the cut with a flat face. Trimming the bottom gives a curved model a stable base.</p>
@@ -646,12 +674,20 @@ function chainLoops(next, total) {
   for (const start of next.keys()) {
     let arr0;
     while ((arr0 = next.get(start)) && arr0.length) {
-      const loop = [start]; let cur = start, closed = false, guard = 0;
+      const loop = [start], at = new Map([[start, 0]]); let cur = start, closed = false, guard = 0;
       while (guard++ <= total) {
         const arr = next.get(cur); if (!arr || !arr.length) break;
         const nx = arr.pop();
         if (nx === start) { closed = true; break; }
-        loop.push(nx); cur = nx;
+        const seen = at.get(nx);
+        if (seen !== undefined) { // the walk touched itself: that stretch is a loop of its own
+          const sub = loop.splice(seen + 1);
+          for (const v of sub) at.delete(v);
+          sub.unshift(nx);
+          if (sub.length >= 3) loops.push(sub);
+          cur = nx; continue;
+        }
+        at.set(nx, loop.length); loop.push(nx); cur = nx;
       }
       if (closed && loop.length >= 3) loops.push(loop);
     }
@@ -704,7 +740,16 @@ function fillHoles(m) {
   const getP = id => id < nv ? [pos[3 * id], pos[3 * id + 1], pos[3 * id + 2]] : extra.slice(3 * (id - nv), 3 * (id - nv) + 3);
   for (const loop of loops) {
     const t = capLoop(loop, getP);
-    if (t) { tris.push(...t); continue; }
+    if (t) {
+      const L = loop.length, onLoop = new Set();
+      for (let i = 0; i < L; i++) onLoop.add(loop[i] * nv + loop[(i + 1) % L]);
+      let clash = false;
+      for (let i = 0; i < t.length && !clash; i += 3) for (let j = 0; j < 3; j++) {
+        const u = t[i + j], v = t[i + (j + 1) % 3];
+        if (!onLoop.has(u * nv + v) && !onLoop.has(v * nv + u) && (dir.has(u * nv + v) || dir.has(v * nv + u))) { clash = true; break; }
+      }
+      if (!clash) { tris.push(...t); continue; }
+    }
     let cx = 0, cy = 0, cz = 0;
     for (const id of loop) { const p = getP(id); cx += p[0]; cy += p[1]; cz += p[2]; }
     const ci = nv + extra.length / 3; extra.push(cx / loop.length, cy / loop.length, cz / loop.length);
@@ -1254,7 +1299,7 @@ function applyTheme() {
   scene.background = lin(tok('--stage'));
   openLines.material.color = lin(tok('--warn'));
   cutPlane.material.color = lin(tok('--accent'));
-  if (typeof ring !== 'undefined') { ring.material.color = lin(tok('--accent')); }
+  if (typeof ring !== 'undefined') { ring.material.color = lin(tok(settings.sculpt.brush === 'erase' ? '--warn' : '--accent')); }
   wireMat.color = lin(tok('--ink'));
   buildPlate(); updateFit(); needsRender = true;
 }
@@ -1263,6 +1308,9 @@ function rebuildDisplay() {
   const m = state.mesh, nf = m.idx.length / 3, { pos, idx } = m;
   const P = new Float32Array(nf * 9), C = new Float32Array(nf * 9);
   const base = lin(settings.color), over = lin(OVERHANG_HEX), lim = -Math.sin(settings.overhang * Math.PI / 180);
+  const selCol = lin(tok('--accent'));
+  let selFaces = null;
+  if (state.sel && state.sel.size) { const pc = partsOf(m); selFaces = new Uint8Array(nf); for (let f = 0; f < nf; f++) if (state.sel.has(pc.faceComp[f])) selFaces[f] = 1; }
   let overArea = 0;
   for (let f = 0; f < nf; f++) {
     const a = idx[3 * f], b = idx[3 * f + 1], c = idx[3 * f + 2];
@@ -1273,7 +1321,7 @@ function rebuildDisplay() {
     const minz = Math.min(pos[3 * a + 2], pos[3 * b + 2], pos[3 * c + 2]);
     const isOver = len > 0 && nz / len < lim && minz > 0.2;
     if (isOver) overArea += len / 2;
-    const col = isOver && settings.showOverhang ? over : base;
+    const col = selFaces && selFaces[f] ? selCol : isOver && settings.showOverhang ? over : base;
     for (let k = 0; k < 3; k++) { C[9 * f + 3 * k] = col.r; C[9 * f + 3 * k + 1] = col.g; C[9 * f + 3 * k + 2] = col.b; }
   }
   state.overArea = overArea;
@@ -1326,7 +1374,7 @@ function setBusy(label) {
 const pause = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 16)));
 
 function setMesh(m, save = true) {
-  state.mesh = m; state.stats = analyze(m);
+  state.mesh = m; state.stats = analyze(m); state.sel = new Set();
   rebuildDisplay(); updateUI();
   if (save) scheduleSave();
 }
@@ -1432,6 +1480,7 @@ function updateUI() {
   cz.max = fmt(Math.max(s[2], 0.2), 1).replace(/,/g, ''); if (!(old > 0 && old < s[2])) cz.value = Math.min(1, s[2] / 4).toFixed(1);
   updateCut();
   updateReduce();
+  updateParts();
   // sculpt: average edge length tells how fine the brushes can work
   const edge = Math.sqrt(st.area / Math.max(st.nf, 1) * 4 / Math.sqrt(3));
   $('#detailOut').textContent = `${fmtInt(st.nf)} triangles · ~${fmt(edge, edge < 1 ? 2 : 1)} mm edges`;
@@ -1630,6 +1679,7 @@ const BRUSHES = {
   inflate: { name: 'Inflate', hint: 'Swells the surface outward in every direction. Good for thickening thin walls before printing.' },
   smooth: { name: 'Smooth', hint: 'Evens out bumps, facets and scan noise where you paint.' },
   flatten: { name: 'Flatten', hint: 'Presses the area onto the plane where the stroke started. Good for flat spots and bases.' },
+  erase: { name: 'Erase', hint: 'Deletes the surface under the brush. Erase a band all the way around a piece to cut it free, then remove it in Modify → Separate parts. Fill holes in Repair closes what is left open.' },
 };
 const ring = new THREE.Mesh(new THREE.RingGeometry(0.9, 1, 64), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide }));
 ring.renderOrder = 6; ring.visible = false; scene.add(ring);
@@ -1685,11 +1735,44 @@ function beginStroke(e) {
     id: e.pointerId, before: m, pos: m.pos.slice(), idx: m.idx, t, vn: vertexNormals(m.pos, m.idx),
     pen: e.pointerType === 'pen', last: null, plane: null, changed: false,
     touched: new Uint8Array(m.pos.length / 3), touchedList: [], tmp: new Float32Array(m.pos.length),
+    dead: new Uint8Array(m.idx.length / 3), deadList: [], erased: 0,
     pending: { x: e.clientX, y: e.clientY, p: e.pressure },
   };
   sculptRT.hover = null;
   const g = model.geometry; if (g.boundingSphere) g.boundingSphere.radius *= 1.6;
 }
+
+// Erase: drop every face whose center is inside the brush.
+function eraseAt(cx, cy, cz) {
+  const st = sculptRT.stroke, P = st.pos, idx = st.idx, r2 = settings.sculpt.size ** 2, nf = idx.length / 3;
+  for (let f = 0; f < nf; f++) {
+    if (st.dead[f]) continue;
+    const a = 3 * idx[3 * f], b = 3 * idx[3 * f + 1], c = 3 * idx[3 * f + 2];
+    const x = (P[a] + P[b] + P[c]) / 3 - cx, y = (P[a + 1] + P[b + 1] + P[c + 1]) / 3 - cy, z = (P[a + 2] + P[b + 2] + P[c + 2]) / 3 - cz;
+    if (x * x + y * y + z * z < r2) killFace(f);
+  }
+}
+// Faces with two or more open edges next to an erased area are slivers; drop them (a few passes).
+function trimRagged(idx, nv, near) {
+  let cur = idx;
+  for (let pass = 0; pass < 4; pass++) {
+    const cnt = new Map(), key = (u, v) => (u < v ? u : v) * nv + (u < v ? v : u);
+    for (let f = 0; f < cur.length; f += 3) for (let j = 0; j < 3; j++) { const k = key(cur[f + j], cur[f + (j + 1) % 3]); cnt.set(k, (cnt.get(k) || 0) + 1); }
+    const keep = []; let removed = 0;
+    for (let f = 0; f < cur.length; f += 3) {
+      const a = cur[f], b = cur[f + 1], c = cur[f + 2];
+      if (near[a] || near[b] || near[c]) {
+        const open = (cnt.get(key(a, b)) === 1) + (cnt.get(key(b, c)) === 1) + (cnt.get(key(c, a)) === 1);
+        if (open >= 2) { removed++; near[a] = near[b] = near[c] = 1; continue; }
+      }
+      keep.push(a, b, c);
+    }
+    cur = Uint32Array.from(keep);
+    if (!removed) break;
+  }
+  return cur;
+}
+function killFace(f) { const st = sculptRT.stroke; if (st.dead[f]) return; st.dead[f] = 1; st.deadList.push(f); st.erased++; st.changed = true; }
 
 // One brush dab centered at c (with an optional mirrored twin).
 function dab(c, pressure) {
@@ -1698,6 +1781,7 @@ function dab(c, pressure) {
   const centers = [[c.x, c.y, c.z, false]];
   if (s.mirror && Math.abs(c.x) > r * 0.25) centers.push([-c.x, c.y, c.z, true]);
   for (const [cx, cy, cz, mirrored] of centers) {
+    if (s.brush === 'erase') { eraseAt(cx, cy, cz); continue; }
     const list = [], ws = [];
     let nx = 0, ny = 0, nz = 0, px = 0, py = 0, pz = 0, wsum = 0;
     for (let v = 0, i = 0; i < P.length; v++, i += 3) {
@@ -1743,13 +1827,20 @@ function dab(c, pressure) {
 
 // Copy sculpted vertices into the on-screen geometry (only the faces that changed).
 function flushSculpt() {
-  const st = sculptRT.stroke; if (!st.touchedList.length) return;
+  const st = sculptRT.stroke; if (!st.touchedList.length && !st.deadList.length) return;
   const attr = model.geometry.attributes.position, arr = attr.array, P = st.pos, idx = st.idx, { vfOff, vf } = st.t;
   let f0 = Infinity, f1 = -1;
+  for (const f of st.deadList) { // collapse erased faces to a point so they vanish
+    const s = 3 * idx[3 * f];
+    for (let o = 9 * f; o < 9 * f + 9; o += 3) { arr[o] = P[s]; arr[o + 1] = P[s + 1]; arr[o + 2] = P[s + 2]; }
+    if (f < f0) f0 = f; if (f > f1) f1 = f;
+  }
+  st.deadList = [];
   for (const v of st.touchedList) {
     st.touched[v] = 0;
     for (let q = vfOff[v]; q < vfOff[v + 1]; q++) {
       const f = vf[q];
+      if (st.dead[f]) continue;
       for (let j = 0; j < 3; j++) { const s = 3 * idx[3 * f + j], o = 9 * f + 3 * j; arr[o] = P[s]; arr[o + 1] = P[s + 1]; arr[o + 2] = P[s + 2]; }
       if (f < f0) f0 = f; if (f > f1) f1 = f;
     }
@@ -1771,6 +1862,7 @@ function sculptFrame() {
   const hit = pickAt(x, y);
   showRing(hit);
   if (!hit) { st.last = null; return; }
+  if (settings.sculpt.brush === 'erase') killFace(hit.faceIndex);
   const pt = hit.point.clone(), spacing = Math.max(settings.sculpt.size * 0.22, 0.05);
   if (!st.last) { dab(pt, p); st.last = pt; }
   else {
@@ -1789,9 +1881,24 @@ function endStroke() {
   sculptRT.stroke = null;
   try { stage.releasePointerCapture(st.id); } catch (e) {}
   if (!st.changed) return;
+  let next = { pos: st.pos, idx: st.idx };
+  if (st.erased) {
+    const nf = st.idx.length / 3, keep = new Uint32Array(st.idx.length - st.erased * 3);
+    let o = 0;
+    for (let f = 0; f < nf; f++) if (!st.dead[f]) { keep[o++] = st.idx[3 * f]; keep[o++] = st.idx[3 * f + 1]; keep[o++] = st.idx[3 * f + 2]; }
+    const near = new Uint8Array(st.pos.length / 3);
+    for (let f = 0; f < nf; f++) if (st.dead[f]) { near[st.idx[3 * f]] = near[st.idx[3 * f + 1]] = near[st.idx[3 * f + 2]] = 1; }
+    const trimmed = o ? trimRagged(keep, st.pos.length / 3, near) : keep.subarray(0, 0);
+    if (!trimmed.length) { toast('That would erase the whole model.', 'warn'); setMesh(st.before, false); return; }
+    next = compact({ pos: st.pos, idx: trimmed });
+  }
   state.history.push({ mesh: st.before, label: 'Sculpt ' + BRUSHES[settings.sculpt.brush].name }); if (state.history.length > 30) state.history.shift();
   state.future = [];
-  setMesh(placeOnBed({ pos: st.pos, idx: st.idx }));
+  setMesh(placeOnBed(next));
+  if (st.erased) {
+    const n = state.stats.parts;
+    toast(`Erased ${fmtInt(st.erased)} triangles.` + (n > 1 ? ` The model is now ${n} separate parts; remove pieces in Modify.` : ''));
+  }
 }
 
 const sculptPointer = e => e.pointerType === 'pen' || (e.pointerType === 'mouse' && e.button === 0) || (e.pointerType === 'touch' && settings.sculpt.finger);
@@ -1824,6 +1931,7 @@ const setBrush = b => {
   sc.brush = b; saveSettings();
   $$('[data-brush]').forEach(x => x.classList.toggle('on', x.dataset.brush === b));
   $('#brushHint').textContent = BRUSHES[b].hint;
+  ring.material.color = lin(tok(b === 'erase' ? '--warn' : '--accent')); needsRender = true;
 };
 $$('[data-brush]').forEach(b => b.onclick = () => setBrush(b.dataset.brush));
 setBrush(BRUSHES[sc.brush] ? sc.brush : 'clay');
@@ -1844,6 +1952,89 @@ $('#doSubdivide').onclick = () => {
 document.addEventListener('keydown', e => {
   if (state.tab !== 'sculpt' || /INPUT|SELECT/.test(document.activeElement.tagName)) return;
   if (e.key === '[' || e.key === ']') { sc.size = Math.min(40, Math.max(0.5, sc.size * (e.key === ']' ? 1.2 : 1 / 1.2))); sc.size = Math.round(sc.size * 2) / 2 || 0.5; saveSettings(); syncSize(); }
+});
+
+// Parts: the mesh's connected pieces, biggest first. faceComp maps each triangle to its part's rank.
+const partsCache = new WeakMap();
+function partsOf(m) {
+  let pc = partsCache.get(m);
+  if (pc) return pc;
+  const { pos, idx } = m, nv = pos.length / 3, nf = idx.length / 3, uf = makeUF(nv);
+  for (let f = 0; f < idx.length; f += 3) { uf.union(idx[f], idx[f + 1]); uf.union(idx[f], idx[f + 2]); }
+  const byRoot = new Map(), rootOf = new Int32Array(nf);
+  for (let f = 0; f < nf; f++) {
+    const r = uf.find(idx[3 * f]); rootOf[f] = r;
+    let p = byRoot.get(r); if (!p) byRoot.set(r, p = { n: 0, lo: [Infinity, Infinity, Infinity], hi: [-Infinity, -Infinity, -Infinity] });
+    p.n++;
+    for (let j = 0; j < 3; j++) for (let k = 0; k < 3; k++) { const c = pos[3 * idx[3 * f + j] + k]; if (c < p.lo[k]) p.lo[k] = c; if (c > p.hi[k]) p.hi[k] = c; }
+  }
+  const parts = [...byRoot.entries()].sort((a, b) => b[1].n - a[1].n).map(([root, p], rank) => {
+    p.root = root; p.rank = rank; p.size = [0, 1, 2].map(k => p.hi[k] - p.lo[k]); p.d = Math.hypot(...p.size); return p;
+  });
+  const rank = new Map(parts.map(p => [p.root, p.rank])), faceComp = new Int32Array(nf);
+  for (let f = 0; f < nf; f++) faceComp[f] = rank.get(rootOf[f]);
+  pc = { parts, faceComp };
+  partsCache.set(m, pc);
+  return pc;
+}
+const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>';
+function updateParts() {
+  const pc = partsOf(state.mesh), n = pc.parts.length, sel = state.sel, list = $('#partsList');
+  $('#partsOut').textContent = n === 1 ? '1 piece' : `${fmtInt(n)} pieces`;
+  $('#partsTools').hidden = n < 2;
+  $('#partsHint').textContent = n > 1
+    ? 'Tap pieces on the model or in the list to select them, then remove them all at once. Selected pieces turn teal.'
+    : 'The model is one connected piece. To split a piece off, erase a band around it with the Erase brush in Sculpt.';
+  list.innerHTML = '';
+  if (n < 2) return;
+  pc.parts.slice(0, 60).forEach(p => {
+    const li = document.createElement('li'), b = document.createElement('button');
+    b.setAttribute('aria-pressed', String(sel.has(p.rank)));
+    const box = document.createElement('span'); box.className = 'box'; box.innerHTML = CHECK_SVG;
+    const label = document.createElement('span'); label.textContent = `Piece ${p.rank + 1}${p.rank === 0 ? ' · largest' : ''}`;
+    const info = document.createElement('small'); info.textContent = `${fmtInt(p.n)} tri · ${p.size.map(v => fmt(v, v < 10 ? 1 : 0)).join(' × ')} mm`;
+    b.append(box, label, info); b.onclick = () => toggleSel(p.rank);
+    li.append(b); list.append(li);
+  });
+  if (n > 60) { const li = document.createElement('li'); li.className = 'more'; li.textContent = `${fmtInt(n - 60)} more small pieces. Tap them on the model, or use Select small bits.`; list.append(li); }
+  $('#delParts').disabled = $('#keepParts').disabled = !sel.size;
+  $('#delParts').textContent = sel.size ? `Delete ${sel.size} piece${sel.size === 1 ? '' : 's'}` : 'Delete selected';
+  $('#selNone').disabled = !sel.size;
+}
+function setSel(ranks) { state.sel = new Set(ranks); rebuildDisplay(); updateParts(); }
+function toggleSel(rank) { const s = new Set(state.sel); s.has(rank) ? s.delete(rank) : s.add(rank); setSel(s); }
+$('#selAll').onclick = () => setSel(partsOf(state.mesh).parts.map(p => p.rank));
+$('#selNone').onclick = () => setSel([]);
+$('#selSmall').onclick = () => {
+  const ps = partsOf(state.mesh).parts, maxN = ps[0].n, maxD = Math.max(...ps.map(p => p.d));
+  const small = ps.filter(p => p.rank > 0 && (p.n < maxN * 0.02 || p.d < maxD * 0.12)).map(p => p.rank);
+  if (!small.length) { toast('No small bits found. Tap pieces to select them yourself.'); return; }
+  setSel(small); toast(`Selected ${small.length} small piece${small.length === 1 ? '' : 's'}.`);
+};
+function removeParts(keepSelected) {
+  const sel = new Set(state.sel), total = partsOf(state.mesh).parts.length, n = sel.size;
+  if (!n) return;
+  if (!keepSelected && n === total) { toast('Keep at least one piece. Clear one from the selection first.', 'warn'); return; }
+  op(keepSelected ? 'Keep selected pieces' : 'Delete pieces', m => {
+    const pc = partsOf(m), keep = [];
+    for (let f = 0; f < pc.faceComp.length; f++) if (sel.has(pc.faceComp[f]) === keepSelected) keep.push(m.idx[3 * f], m.idx[3 * f + 1], m.idx[3 * f + 2]);
+    return { mesh: compact({ pos: m.pos, idx: Uint32Array.from(keep) }),
+      note: keepSelected ? `Kept ${n} piece${n === 1 ? '' : 's'} and removed ${total - n}.` : `Deleted ${n} piece${n === 1 ? '' : 's'}.` };
+  });
+}
+$('#delParts').onclick = () => removeParts(false);
+$('#keepParts').onclick = () => removeParts(true);
+// In the Modify tab, a tap on the model toggles the piece under it.
+let tapStart = null;
+canvas.addEventListener('pointerdown', e => { tapStart = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+canvas.addEventListener('pointerup', e => {
+  const t = tapStart; tapStart = null;
+  if (!t || state.tab !== 'modify' || !state.mesh || state.busy) return;
+  if (Math.hypot(e.clientX - t.x, e.clientY - t.y) > 10 || performance.now() - t.t > 500) return;
+  const hit = pickAt(e.clientX, e.clientY); if (!hit) return;
+  const pc = partsOf(state.mesh);
+  if (pc.parts.length < 2) { toast('The model is one connected piece, so there is nothing separate to select.'); return; }
+  toggleSel(pc.faceComp[hit.faceIndex]);
 });
 
 // Repair
