@@ -221,7 +221,7 @@ button.file-chip:hover{background:var(--sunken)}
   <header class="bar">
     <div class="brand">
       <svg viewBox="0 0 26 26" aria-hidden="true"><path d="M7 2h12v6H7z" fill="var(--accent)"/><path d="M9 8h8l-1.6 7h-4.8z" fill="var(--accent)" opacity=".75"/><path d="M11.6 15h2.8L13 19z" fill="var(--accent)"/><path d="M3 23h20" stroke="var(--ink)" stroke-width="2" stroke-linecap="round"/><path d="M8 21h10" stroke="var(--warn)" stroke-width="2" stroke-linecap="round"/></svg>
-      <span>Print Bench</span><small>OBJ · STL</small>
+      <span>Print Bench</span><small>OBJ · STL · GLB</small>
     </div>
     <button class="btn has-lbl" id="openBtn" aria-label="Open a model"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span class="lbl">Open</span></button>
     <button class="btn has-lbl" id="libraryBtn" aria-label="Your saved models"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg><span class="lbl">Models</span></button>
@@ -243,7 +243,7 @@ button.file-chip:hover{background:var(--sunken)}
       <button class="btn" data-view="top">Top</button>
     </div>
     <div class="banner" id="placeBanner" hidden><span>Tap the face that should sit on the bed</span><button class="btn small" id="placeCancel">Cancel</button></div>
-    <div class="drop-veil" id="dropVeil" hidden>Drop an .obj or .stl file</div>
+    <div class="drop-veil" id="dropVeil" hidden>Drop an .obj, .stl or .glb file</div>
     <div class="busy-veil" id="busy" hidden><div class="busy-card"><div class="spin"></div><span id="busyLabel">Working…</span></div></div>
   </main>
 
@@ -442,6 +442,7 @@ button.file-chip:hover{background:var(--sunken)}
 <div class="menu" id="exportMenu" hidden role="menu">
   <button role="menuitem" data-export="stl"><b>STL for your slicer</b><span>Binary STL, the format every slicer opens.</span></button>
   <button role="menuitem" data-export="obj"><b>OBJ</b><span>Keeps the edits for other 3D apps.</span></button>
+  <button role="menuitem" data-export="glb"><b>GLB</b><span>For Blender, AR viewers and the web. Y up, in meters, in your filament color.</span></button>
   <button role="menuitem" data-export="png"><b>Snapshot</b><span>PNG of the current view.</span></button>
   <p>Opens the share sheet: Save to Files, AirDrop it, or send it to a slicer app. Exports use print orientation, Z up, in millimeters.</p>
 </div>
@@ -1072,6 +1073,96 @@ function toSTL(m) {
   }
   return new Uint8Array(buf);
 }
+// glTF 2.0: a .glb file, or a .gltf with its buffers embedded. Reads every triangle mesh in the scene with its node transforms.
+function parseGLTF(buf) {
+  const dv = new DataView(buf); let json = null, bin = null;
+  if (buf.byteLength >= 12 && dv.getUint32(0, true) === 0x46546C67) {
+    if (dv.getUint32(4, true) !== 2) throw new Error('only glTF 2.0 files are supported');
+    for (let o = 12; o + 8 <= buf.byteLength;) {
+      const len = dv.getUint32(o, true), type = dv.getUint32(o + 4, true);
+      if (type === 0x4E4F534A) json = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, o + 8, len)));
+      else if (type === 0x004E4942) bin = new Uint8Array(buf, o + 8, len);
+      o += 8 + len;
+    }
+  } else json = JSON.parse(new TextDecoder().decode(new Uint8Array(buf)));
+  if (!json) throw new Error('it has no glTF data');
+  const req = json.extensionsRequired || [];
+  if (req.includes('KHR_draco_mesh_compression')) throw new Error('it uses Draco compression. Export it again with compression turned off');
+  if (req.includes('EXT_meshopt_compression')) throw new Error('it uses meshopt compression. Export it again with compression turned off');
+  const buffers = (json.buffers || []).map(b => {
+    if (b.uri === undefined) return bin;
+    if (b.uri.startsWith('data:')) { const s = atob(b.uri.slice(b.uri.indexOf(',') + 1)), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
+    throw new Error('its data is in a separate .bin file. Open the .glb version instead');
+  });
+  const SIZE = { 5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4 }, COMPS = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 };
+  const NORM = { 5120: 127, 5121: 255, 5122: 32767, 5123: 65535 };
+  const read = ai => {
+    const acc = json.accessors[ai], comps = COMPS[acc.type], out = new Float64Array(acc.count * comps);
+    if (acc.bufferView === undefined) return out;
+    const bv = json.bufferViews[acc.bufferView], b = buffers[bv.buffer];
+    if (!b) throw new Error('a buffer is missing');
+    const size = SIZE[acc.componentType], stride = bv.byteStride || size * comps;
+    const d = new DataView(b.buffer, b.byteOffset + (bv.byteOffset || 0) + (acc.byteOffset || 0));
+    const get = { 5120: o => d.getInt8(o), 5121: o => d.getUint8(o), 5122: o => d.getInt16(o, true), 5123: o => d.getUint16(o, true), 5125: o => d.getUint32(o, true), 5126: o => d.getFloat32(o, true) }[acc.componentType];
+    const k = acc.normalized ? 1 / NORM[acc.componentType] : 1;
+    for (let i = 0; i < acc.count; i++) for (let c = 0; c < comps; c++) out[i * comps + c] = get(i * stride + c * size) * k;
+    return out;
+  };
+  const pos = [], idx = [];
+  const addMesh = (mi, world) => {
+    const e = world.elements, flip = world.determinant() < 0;
+    for (const pr of json.meshes[mi].primitives) {
+      const mode = pr.mode === undefined ? 4 : pr.mode;
+      if ((mode !== 4 && mode !== 5 && mode !== 6) || pr.attributes.POSITION === undefined) continue;
+      const p = read(pr.attributes.POSITION), base = pos.length / 3, count = p.length / 3;
+      for (let i = 0; i < p.length; i += 3) { const x = p[i], y = p[i + 1], z = p[i + 2]; pos.push(e[0] * x + e[4] * y + e[8] * z + e[12], e[1] * x + e[5] * y + e[9] * z + e[13], e[2] * x + e[6] * y + e[10] * z + e[14]); }
+      const ind = pr.indices !== undefined ? read(pr.indices) : Float64Array.from({ length: count }, (_, i) => i);
+      const tri = (a, b, c) => { if (flip) idx.push(base + a, base + c, base + b); else idx.push(base + a, base + b, base + c); };
+      if (mode === 4) for (let i = 0; i + 2 < ind.length; i += 3) tri(ind[i], ind[i + 1], ind[i + 2]);
+      else if (mode === 5) for (let i = 0; i + 2 < ind.length; i++) { if (i % 2) tri(ind[i + 1], ind[i], ind[i + 2]); else tri(ind[i], ind[i + 1], ind[i + 2]); }
+      else for (let i = 1; i + 1 < ind.length; i++) tri(ind[0], ind[i], ind[i + 1]);
+    }
+  };
+  const visit = (ni, parent) => {
+    const n = json.nodes[ni], m = new THREE.Matrix4();
+    if (n.matrix) m.fromArray(n.matrix);
+    else m.compose(new THREE.Vector3(...(n.translation || [0, 0, 0])), new THREE.Quaternion(...(n.rotation || [0, 0, 0, 1])), new THREE.Vector3(...(n.scale || [1, 1, 1])));
+    const world = parent.clone().multiply(m);
+    if (n.mesh !== undefined) addMesh(n.mesh, world);
+    for (const c of n.children || []) visit(c, world);
+  };
+  const scene = json.scenes && json.scenes[json.scene || 0];
+  if (scene && scene.nodes) for (const r of scene.nodes) visit(r, new THREE.Matrix4());
+  else (json.meshes || []).forEach((_, mi) => addMesh(mi, new THREE.Matrix4()));
+  for (let i = 0; i < pos.length; i++) if (!isFinite(pos[i])) pos[i] = 0;
+  return { pos: Float32Array.from(pos), idx: Uint32Array.from(idx) };
+}
+// GLB out: Y-up and meters, as glTF expects, tinted with the chosen filament color.
+function toGLB(m, name) {
+  const { pos, idx } = m, nv = pos.length / 3, P = new Float32Array(pos.length), mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < pos.length; i += 3) {
+    const v = [pos[i] / 1000, pos[i + 2] / 1000, -pos[i + 1] / 1000];
+    for (let k = 0; k < 3; k++) { P[i + k] = v[k]; if (v[k] < mn[k]) mn[k] = v[k]; if (v[k] > mx[k]) mx[k] = v[k]; }
+  }
+  const c = new THREE.Color(settings.color).convertSRGBToLinear();
+  const posBytes = P.byteLength, idxBytes = idx.length * 4;
+  const json = {
+    asset: { version: '2.0', generator: 'Print Bench' }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ mesh: 0, name }],
+    materials: [{ name: 'Filament', pbrMetallicRoughness: { baseColorFactor: [c.r, c.g, c.b, 1], metallicFactor: 0, roughnessFactor: 0.6 } }],
+    meshes: [{ name, primitives: [{ attributes: { POSITION: 0 }, indices: 1, material: 0, mode: 4 }] }],
+    accessors: [{ bufferView: 0, componentType: 5126, count: nv, type: 'VEC3', min: mn, max: mx }, { bufferView: 1, componentType: 5125, count: idx.length, type: 'SCALAR' }],
+    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: posBytes, target: 34962 }, { buffer: 0, byteOffset: posBytes, byteLength: idxBytes, target: 34963 }],
+    buffers: [{ byteLength: posBytes + idxBytes }],
+  };
+  let jsonBytes = new TextEncoder().encode(JSON.stringify(json));
+  const jpad = (4 - jsonBytes.length % 4) % 4, jlen = jsonBytes.length + jpad, blen = posBytes + idxBytes;
+  const out = new Uint8Array(12 + 8 + jlen + 8 + blen), dv = new DataView(out.buffer);
+  dv.setUint32(0, 0x46546C67, true); dv.setUint32(4, 2, true); dv.setUint32(8, out.length, true);
+  dv.setUint32(12, jlen, true); dv.setUint32(16, 0x4E4F534A, true); out.set(jsonBytes, 20); out.fill(0x20, 20 + jsonBytes.length, 20 + jlen);
+  const b0 = 20 + jlen; dv.setUint32(b0, blen, true); dv.setUint32(b0 + 4, 0x004E4942, true);
+  out.set(new Uint8Array(P.buffer), b0 + 8); out.set(new Uint8Array(Uint32Array.from(idx).buffer), b0 + 8 + posBytes);
+  return out;
+}
 function toOBJ(m, name) {
   const { pos, idx } = m, lines = ['# ' + name + ' — exported by Print Bench', '# units: mm, Z up', 'o ' + name.replace(/\s+/g, '_')];
   for (let i = 0; i < pos.length; i += 3) lines.push('v ' + +pos[i].toFixed(5) + ' ' + +pos[i + 1].toFixed(5) + ' ' + +pos[i + 2].toFixed(5));
@@ -1562,7 +1653,7 @@ function updateReduce() {
 // ---------- import / export ----------
 async function importFile(file) {
   const ext = (file.name.split('.').pop() || '').toLowerCase();
-  if (ext !== 'obj' && ext !== 'stl') { toast('Pick an .obj or .stl file.', 'warn'); return; }
+  if (!['obj', 'stl', 'glb', 'gltf'].includes(ext)) { toast('Pick an .obj, .stl or .glb file.', 'warn'); return; }
   await flushSave();
   setBusy('Reading ' + file.name + '…'); await pause();
   try {
@@ -1570,13 +1661,17 @@ async function importFile(file) {
     if (ext === 'obj') {
       raw = parseOBJ(await file.text());
       raw = transformMesh(raw, new THREE.Matrix4().makeRotationX(Math.PI / 2)); // OBJ is Y-up; printing is Z-up
+    } else if (ext === 'glb' || ext === 'gltf') {
+      raw = parseGLTF(await file.arrayBuffer());
+      // glTF is Y-up and in meters; printing is Z-up in millimeters
+      raw = transformMesh(raw, new THREE.Matrix4().makeScale(1000, 1000, 1000).multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2)));
     } else raw = parseSTL(await file.arrayBuffer());
     if (!raw.idx.length) throw new Error('no faces were found in the file');
     const m = placeOnBed(weld(raw, Math.max(diagOf(raw) * 1e-6, 1e-7)).mesh);
     state.history = []; state.future = []; state.name = file.name.replace(/\.[^.]+$/, ''); state.example = false;
     state.projectId = null; state.created = null;
     setMesh(m); fitView('iso');
-    toast(ext === 'obj' ? `Opened ${file.name}. Stood it upright from Y-up; use Rotate X if it lies wrong.` : `Opened ${file.name}.`);
+    toast(ext === 'stl' ? `Opened ${file.name}.` : ext === 'obj' ? `Opened ${file.name}. Stood it upright from Y-up; use Rotate X if it lies wrong.` : `Opened ${file.name}. Converted from meters and stood it upright; use Rotate X if it lies wrong.`);
   } catch (e) {
     console.error(e); toast(`Couldn't open ${file.name}: ${e.message}.`, 'warn');
   } finally { setBusy(null); }
@@ -1608,8 +1703,8 @@ function exportAs(kind) {
     return;
   }
   if (!state.stats.watertight) toast('Heads up: the model still has open or flipped faces. The Repair tab can fix that.', 'warn');
-  const bytes = kind === 'stl' ? toSTL(state.mesh) : toOBJ(state.mesh, base);
-  shareFile(new File([bytes], `${base}.${kind}`, { type: kind === 'stl' ? 'model/stl' : 'model/obj' }));
+  const bytes = kind === 'stl' ? toSTL(state.mesh) : kind === 'glb' ? toGLB(state.mesh, base) : toOBJ(state.mesh, base);
+  shareFile(new File([bytes], `${base}.${kind}`, { type: { stl: 'model/stl', glb: 'model/gltf-binary', obj: 'model/obj' }[kind] }));
 }
 
 function loadExample() {

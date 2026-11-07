@@ -1,6 +1,6 @@
 # Print Bench
 
-An iPad app for getting OBJ and STL models ready to 3D print: resize and orient them, sculpt with Apple Pencil, repair holes and flipped faces, cut a flat base, check the fit on your printer, and export STL.
+An iPad app for getting OBJ, STL and GLB models ready to 3D print: resize and orient them, sculpt with Apple Pencil, repair holes and flipped faces, cut a flat base, check the fit on your printer, and export STL.
 
 Open it at **https://zahra-hasan.github.io/print-bench/**
 
@@ -14,7 +14,7 @@ Open it at **https://zahra-hasan.github.io/print-bench/**
 
 - Every model you open or change saves automatically on the iPad. Tap **Models** to open, rename, copy or delete saved models.
 - Models stay on the device and are never uploaded. Deleting the app from the Home Screen deletes its saved models, so export anything you want to keep.
-- **Export → STL** opens the share sheet: Save to Files, AirDrop, or send it to a slicer app.
+- **Export → STL** opens the share sheet: Save to Files, AirDrop, or send it to a slicer app. **Export → GLB** gives a colored model for Blender, AR viewers and the web.
 
 ## Updating
 
