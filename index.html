@@ -368,6 +368,18 @@ button.file-chip:hover{background:var(--sunken)}
         </div>
       </section>
       <section class="group">
+        <h3>Add a base <output id="baseOut">3 mm thick</output></h3>
+        <p class="hint">Stands the model on a plinth: a steady, flat bottom to print on. The model sinks 0.3 mm into it so the slicer joins them into one piece.</p>
+        <div class="seg">
+          <button class="btn small on" id="baseOval">Oval</button>
+          <button class="btn small" id="baseRect">Rectangle</button>
+        </div>
+        <input type="range" id="baseH" min="1" max="15" step="0.5" value="3" aria-label="Base thickness">
+        <h3>Margin <output id="baseMOut">4 mm</output></h3>
+        <input type="range" id="baseM" min="0" max="20" step="1" value="4" aria-label="Base margin around the model">
+        <button class="btn primary wide" id="doBase">Add base</button>
+      </section>
+      <section class="group">
         <h3>Cut flat <output id="cutOut">0.0 mm</output></h3>
         <p class="hint">Slices the model at a height and caps the cut with a flat face. Trimming the bottom gives a curved model a stable base.</p>
         <input type="range" id="cutZ" min="0" max="10" step="0.1" value="1" aria-label="Cut height">
@@ -1304,6 +1316,32 @@ function applyTheme() {
   buildPlate(); updateFit(); needsRender = true;
 }
 
+// Downward faces lying on, or sunk just inside, an upward-facing surface below (a model set into a base) need no support.
+function restingFaces(m) {
+  const { pos, idx } = m, nf = idx.length / 3, CELL = 2, grid = new Map(), out = new Uint8Array(nf);
+  const key = (i, j) => (i + 50000) * 100000 + (j + 50000);
+  const info = f => {
+    const a = 3 * idx[3 * f], b = 3 * idx[3 * f + 1], c = 3 * idx[3 * f + 2];
+    const ux = pos[b] - pos[a], uy = pos[b + 1] - pos[a + 1], uz = pos[b + 2] - pos[a + 2], vx = pos[c] - pos[a], vy = pos[c + 1] - pos[a + 1], vz = pos[c + 2] - pos[a + 2];
+    const nz = ux * vy - uy * vx, len = Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, nz) || 1;
+    return { n: nz / len, a, b, c, z: (pos[a + 2] + pos[b + 2] + pos[c + 2]) / 3 };
+  };
+  for (let f = 0; f < nf; f++) {
+    const t = info(f); if (t.n < 0.9) continue;
+    const xs = [pos[t.a], pos[t.b], pos[t.c]], ys = [pos[t.a + 1], pos[t.b + 1], pos[t.c + 1]];
+    const i0 = Math.floor(Math.min(...xs) / CELL), i1 = Math.floor(Math.max(...xs) / CELL), j0 = Math.floor(Math.min(...ys) / CELL), j1 = Math.floor(Math.max(...ys) / CELL);
+    if ((i1 - i0 + 1) * (j1 - j0 + 1) > 20000) continue;
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) { const k = key(i, j), l = grid.get(k); if (l) l.push(t.z); else grid.set(k, [t.z]); }
+  }
+  if (!grid.size) return out;
+  for (let f = 0; f < nf; f++) {
+    const t = info(f); if (t.n > -0.5) continue;
+    const l = grid.get(key(Math.floor((pos[t.a] + pos[t.b] + pos[t.c]) / 3 / CELL), Math.floor((pos[t.a + 1] + pos[t.b + 1] + pos[t.c + 1]) / 3 / CELL)));
+    if (l && l.some(z => z >= t.z - 0.6 && z <= t.z + 1.5)) out[f] = 1;
+  }
+  return out;
+}
+
 function rebuildDisplay() {
   const m = state.mesh, nf = m.idx.length / 3, { pos, idx } = m;
   const P = new Float32Array(nf * 9), C = new Float32Array(nf * 9);
@@ -1312,6 +1350,7 @@ function rebuildDisplay() {
   let selFaces = null;
   if (state.sel && state.sel.size) { const pc = partsOf(m); selFaces = new Uint8Array(nf); for (let f = 0; f < nf; f++) if (state.sel.has(pc.faceComp[f])) selFaces[f] = 1; }
   let overArea = 0;
+  const rests = restingFaces(m);
   for (let f = 0; f < nf; f++) {
     const a = idx[3 * f], b = idx[3 * f + 1], c = idx[3 * f + 2];
     for (let k = 0; k < 3; k++) { P[9 * f + k] = pos[3 * a + k]; P[9 * f + 3 + k] = pos[3 * b + k]; P[9 * f + 6 + k] = pos[3 * c + k]; }
@@ -1319,7 +1358,7 @@ function rebuildDisplay() {
     const vx = pos[3 * c] - pos[3 * a], vy = pos[3 * c + 1] - pos[3 * a + 1], vz = pos[3 * c + 2] - pos[3 * a + 2];
     const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, len = Math.hypot(nx, ny, nz);
     const minz = Math.min(pos[3 * a + 2], pos[3 * b + 2], pos[3 * c + 2]);
-    const isOver = len > 0 && nz / len < lim && minz > 0.2;
+    const isOver = len > 0 && nz / len < lim && minz > 0.2 && !rests[f];
     if (isOver) overArea += len / 2;
     const col = selFaces && selFaces[f] ? selCol : isOver && settings.showOverhang ? over : base;
     for (let k = 0; k < 3; k++) { C[9 * f + 3 * k] = col.r; C[9 * f + 3 * k + 1] = col.g; C[9 * f + 3 * k + 2] = col.b; }
@@ -2036,6 +2075,64 @@ canvas.addEventListener('pointerup', e => {
   if (pc.parts.length < 2) { toast('The model is one connected piece, so there is nothing separate to select.'); return; }
   toggleSel(pc.faceComp[hit.faceIndex]);
 });
+
+// Base: a beveled plinth under the model's footprint.
+function plinth(shape, cx, cy, rx, ry, h) {
+  const bev = Math.min(0.8, h / 3), out = [];
+  const ring = (ox, oy) => {
+    const pts = [];
+    if (shape === 'oval') for (let i = 0; i < 128; i++) { const t = i / 128 * Math.PI * 2; pts.push([cx + ox * Math.cos(t), cy + oy * Math.sin(t)]); }
+    else {
+      const rc = Math.min(5, ox * 0.4, oy * 0.4);
+      [[1, 1], [-1, 1], [-1, -1], [1, -1]].forEach(([sx, sy], q) => {
+        for (let i = 0; i <= 12; i++) {
+          const t = (q + i / 12) * Math.PI / 2;
+          pts.push([cx + sx * (ox - rc) + rc * Math.cos(t), cy + sy * (oy - rc) + rc * Math.sin(t)]);
+        }
+      });
+    }
+    return pts;
+  };
+  const bot = ring(rx, ry), top = ring(rx - bev, ry - bev), n = bot.length;
+  for (const [x, y] of bot) out.push(x, y, 0);
+  for (const [x, y] of top) out.push(x, y, h);
+  out.push(cx, cy, 0, cx, cy, h);
+  const cb = 2 * n, ct = 2 * n + 1, idx = [];
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    idx.push(i, j, n + j, i, n + j, n + i, cb, j, i, ct, n + i, n + j);
+  }
+  return { pos: Float32Array.from(out), idx: Uint32Array.from(idx) };
+}
+function addBase(m, shape, h, margin) {
+  const { pos } = m, b = bounds(m), band = b.min[2] + Math.max(b.size[2] * 0.15, 0.5);
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (let i = 0; i < pos.length; i += 3) if (pos[i + 2] <= band) {
+    if (pos[i] < x0) x0 = pos[i]; if (pos[i] > x1) x1 = pos[i]; if (pos[i + 1] < y0) y0 = pos[i + 1]; if (pos[i + 1] > y1) y1 = pos[i + 1];
+  }
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, hx = (x1 - x0) / 2, hy = (y1 - y0) / 2;
+  // an ellipse needs √2 more reach than the box it surrounds
+  const rx = (shape === 'oval' ? hx * Math.SQRT2 : hx) + margin, ry = (shape === 'oval' ? hy * Math.SQRT2 : hy) + margin;
+  const base = plinth(shape, cx, cy, rx, ry, h), lift = h - b.min[2] - 0.3, nv = pos.length / 3;
+  const P = new Float32Array(pos.length + base.pos.length);
+  for (let i = 0; i < pos.length; i += 3) { P[i] = pos[i]; P[i + 1] = pos[i + 1]; P[i + 2] = pos[i + 2] + lift; }
+  P.set(base.pos, pos.length);
+  const I = new Uint32Array(m.idx.length + base.idx.length); I.set(m.idx);
+  for (let k = 0; k < base.idx.length; k++) I[m.idx.length + k] = base.idx[k] + nv;
+  return { mesh: { pos: P, idx: I }, size: [2 * rx, 2 * ry] };
+}
+let baseShape = 'oval';
+const syncBase = () => {
+  $('#baseOut').textContent = `${fmt(+$('#baseH').value, 1)} mm thick`; $('#baseMOut').textContent = `${$('#baseM').value} mm`;
+  $('#baseOval').classList.toggle('on', baseShape === 'oval'); $('#baseRect').classList.toggle('on', baseShape === 'rect');
+};
+$('#baseOval').onclick = () => { baseShape = 'oval'; syncBase(); };
+$('#baseRect').onclick = () => { baseShape = 'rect'; syncBase(); };
+$('#baseH').oninput = syncBase; $('#baseM').oninput = syncBase;
+$('#doBase').onclick = () => {
+  const h = +$('#baseH').value, mg = +$('#baseM').value;
+  op('Add base', m => { const r = addBase(m, baseShape, h, mg); return { mesh: r.mesh, note: `Added a ${fmt(r.size[0], 0)} × ${fmt(r.size[1], 0)} mm ${baseShape === 'oval' ? 'oval' : 'rectangular'} base, ${fmt(h, 1)} mm thick.` }; });
+};
 
 // Repair
 $('#repairAll').onclick = () => op('Repair', m => {
