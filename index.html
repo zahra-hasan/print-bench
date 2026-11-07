@@ -1073,8 +1073,27 @@ function toSTL(m) {
   }
   return new Uint8Array(buf);
 }
+// meshopt decoder for compressed glTF (Tripo and others export this), loaded only when a file needs it
+const MESHOPT_SRC = 'vendor/meshopt_decoder.js';
+let meshoptP = null;
+function loadMeshopt() {
+  if (!meshoptP) {
+    meshoptP = new Promise((res, rej) => {
+      if (window.MeshoptDecoder) return res(window.MeshoptDecoder);
+      const s = document.createElement('script');
+      s.src = MESHOPT_SRC; s.onload = () => res(window.MeshoptDecoder); s.onerror = () => rej(new Error('the decoder for compressed files could not load. Check your connection and try again'));
+      document.head.append(s);
+    }).then(async d => {
+      if (!d) throw new Error('the decoder for compressed files could not load');
+      try { await d.ready; } catch (e) { throw new Error('this browser blocked the decoder for compressed files. Open it in the Print Bench app, or export it again without compression'); }
+      return d;
+    });
+    meshoptP.catch(() => { meshoptP = null; });
+  }
+  return meshoptP;
+}
 // glTF 2.0: a .glb file, or a .gltf with its buffers embedded. Reads every triangle mesh in the scene with its node transforms.
-function parseGLTF(buf) {
+function parseGLTF(buf, meshopt) {
   const dv = new DataView(buf); let json = null, bin = null;
   if (buf.byteLength >= 12 && dv.getUint32(0, true) === 0x46546C67) {
     if (dv.getUint32(4, true) !== 2) throw new Error('only glTF 2.0 files are supported');
@@ -1088,21 +1107,32 @@ function parseGLTF(buf) {
   if (!json) throw new Error('it has no glTF data');
   const req = json.extensionsRequired || [];
   if (req.includes('KHR_draco_mesh_compression')) throw new Error('it uses Draco compression. Export it again with compression turned off');
-  if (req.includes('EXT_meshopt_compression')) throw new Error('it uses meshopt compression. Export it again with compression turned off');
+  if (req.includes('EXT_meshopt_compression') && !meshopt) throw new Error('it uses meshopt compression and the decoder is not loaded');
   const buffers = (json.buffers || []).map(b => {
-    if (b.uri === undefined) return bin;
+    if (b.uri === undefined) return bin;   // also the empty fallback buffer of meshopt files
     if (b.uri.startsWith('data:')) { const s = atob(b.uri.slice(b.uri.indexOf(',') + 1)), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
     throw new Error('its data is in a separate .bin file. Open the .glb version instead');
+  });
+  // decompress meshopt buffer views up front
+  const decoded = {};
+  (json.bufferViews || []).forEach((bv, i) => {
+    const ext = bv.extensions && bv.extensions.EXT_meshopt_compression;
+    if (!ext) return;
+    const src = buffers[ext.buffer];
+    if (!src) throw new Error('a compressed buffer is missing');
+    const target = new Uint8Array(ext.count * ext.byteStride);
+    meshopt.decodeGltfBuffer(target, ext.count, ext.byteStride, new Uint8Array(src.buffer, src.byteOffset + (ext.byteOffset || 0), ext.byteLength), ext.mode, ext.filter || 'NONE');
+    decoded[i] = target;
   });
   const SIZE = { 5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4 }, COMPS = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 };
   const NORM = { 5120: 127, 5121: 255, 5122: 32767, 5123: 65535 };
   const read = ai => {
     const acc = json.accessors[ai], comps = COMPS[acc.type], out = new Float64Array(acc.count * comps);
     if (acc.bufferView === undefined) return out;
-    const bv = json.bufferViews[acc.bufferView], b = buffers[bv.buffer];
+    const bv = json.bufferViews[acc.bufferView], dec = decoded[acc.bufferView], b = dec || buffers[bv.buffer];
     if (!b) throw new Error('a buffer is missing');
     const size = SIZE[acc.componentType], stride = bv.byteStride || size * comps;
-    const d = new DataView(b.buffer, b.byteOffset + (bv.byteOffset || 0) + (acc.byteOffset || 0));
+    const d = new DataView(b.buffer, b.byteOffset + (dec ? 0 : (bv.byteOffset || 0)) + (acc.byteOffset || 0));
     const get = { 5120: o => d.getInt8(o), 5121: o => d.getUint8(o), 5122: o => d.getInt16(o, true), 5123: o => d.getUint16(o, true), 5125: o => d.getUint32(o, true), 5126: o => d.getFloat32(o, true) }[acc.componentType];
     const k = acc.normalized ? 1 / NORM[acc.componentType] : 1;
     for (let i = 0; i < acc.count; i++) for (let c = 0; c < comps; c++) out[i * comps + c] = get(i * stride + c * size) * k;
@@ -1662,7 +1692,11 @@ async function importFile(file) {
       raw = parseOBJ(await file.text());
       raw = transformMesh(raw, new THREE.Matrix4().makeRotationX(Math.PI / 2)); // OBJ is Y-up; printing is Z-up
     } else if (ext === 'glb' || ext === 'gltf') {
-      raw = parseGLTF(await file.arrayBuffer());
+      const buf = await file.arrayBuffer();
+      const head = new TextDecoder().decode(new Uint8Array(buf, 0, Math.min(buf.byteLength, 262144)));
+      let meshopt = null;
+      if (head.includes('EXT_meshopt_compression')) { setBusy('Loading the decoder for compressed files…'); meshopt = await loadMeshopt(); setBusy('Unpacking ' + file.name + '…'); await pause(); }
+      raw = parseGLTF(buf, meshopt);
       // glTF is Y-up and in meters; printing is Z-up in millimeters
       raw = transformMesh(raw, new THREE.Matrix4().makeScale(1000, 1000, 1000).multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2)));
     } else raw = parseSTL(await file.arrayBuffer());
@@ -1671,7 +1705,7 @@ async function importFile(file) {
     state.history = []; state.future = []; state.name = file.name.replace(/\.[^.]+$/, ''); state.example = false;
     state.projectId = null; state.created = null;
     setMesh(m); fitView('iso');
-    toast(ext === 'stl' ? `Opened ${file.name}.` : ext === 'obj' ? `Opened ${file.name}. Stood it upright from Y-up; use Rotate X if it lies wrong.` : `Opened ${file.name}. Converted from meters and stood it upright; use Rotate X if it lies wrong.`);
+    toast(ext === 'stl' ? `Opened ${file.name}.` : ext === 'obj' ? `Opened ${file.name}. Stood it upright from Y-up; use Rotate X if it lies wrong.` : `Opened ${file.name}. Converted from meters and stood it upright; use Rotate X if it lies wrong.` + (m.idx.length > 2400000 ? ` It's heavy (${fmtInt(m.idx.length / 3)} triangles); Modify → Reduce triangles makes it faster.` : ''));
   } catch (e) {
     console.error(e); toast(`Couldn't open ${file.name}: ${e.message}.`, 'warn');
   } finally { setBusy(null); }

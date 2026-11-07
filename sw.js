@@ -1,9 +1,9 @@
 // Offline support for Print Bench. Bump VERSION whenever any app file changes.
-const VERSION = 'print-bench-v4';
+const VERSION = 'print-bench-v5';
 const FONTS = 'print-bench-fonts';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest',
-  'vendor/three.min.js', 'vendor/OrbitControls.js',
+  'vendor/three.min.js', 'vendor/OrbitControls.js', 'vendor/meshopt_decoder.js',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png',
 ];
 
