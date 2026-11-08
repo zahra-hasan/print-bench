@@ -441,7 +441,7 @@ button.file-chip:hover{background:var(--sunken)}
 
 <div class="menu" id="exportMenu" hidden role="menu">
   <button role="menuitem" data-export="stl"><b>STL for your slicer</b><span>Binary STL, the format every slicer opens.</span></button>
-  <button role="menuitem" data-export="obj"><b>OBJ</b><span>Keeps the edits for other 3D apps.</span></button>
+  <button role="menuitem" data-export="obj"><b>OBJ</b><span>Keeps the edits for other 3D apps. Includes UVs, so Procreate can paint it.</span></button>
   <button role="menuitem" data-export="glb"><b>GLB</b><span>For Blender, AR viewers and the web. Y up, in meters, in your filament color.</span></button>
   <button role="menuitem" data-export="png"><b>Snapshot</b><span>PNG of the current view.</span></button>
   <p>Opens the share sheet: Save to Files, AirDrop it, or send it to a slicer app. Exports use print orientation, Z up, in millimeters.</p>
@@ -1193,10 +1193,78 @@ function toGLB(m, name) {
   out.set(new Uint8Array(P.buffer), b0 + 8); out.set(new Uint8Array(Uint32Array.from(idx).buffer), b0 + 8 + posBytes);
   return out;
 }
+// Automatic UVs so painting apps (Procreate, Nomad, Substance) accept the model.
+// Faces are grouped into charts by the axis they face most, each chart is projected flat
+// onto that axis's plane, and the charts are shelf-packed into the unit square without overlap.
+function uvUnwrap(m) {
+  const { pos, idx } = m, nf = idx.length / 3, nv = pos.length / 3;
+  const label = new Uint8Array(nf);
+  for (let f = 0; f < nf; f++) {
+    const a = 3 * idx[3 * f], b = 3 * idx[3 * f + 1], c = 3 * idx[3 * f + 2];
+    const ux = pos[b] - pos[a], uy = pos[b + 1] - pos[a + 1], uz = pos[b + 2] - pos[a + 2];
+    const vx = pos[c] - pos[a], vy = pos[c + 1] - pos[a + 1], vz = pos[c + 2] - pos[a + 2];
+    const n = [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx];
+    let ax = 0; if (Math.abs(n[1]) > Math.abs(n[ax])) ax = 1; if (Math.abs(n[2]) > Math.abs(n[ax])) ax = 2;
+    label[f] = ax * 2 + (n[ax] < 0 ? 1 : 0);
+  }
+  // face neighbours across edges
+  const edgeFace = new Map(), nb = new Int32Array(3 * nf).fill(-1);
+  for (let f = 0; f < nf; f++) for (let e = 0; e < 3; e++) {
+    const a = idx[3 * f + e], b = idx[3 * f + (e + 1) % 3], k = a < b ? a * nv + b : b * nv + a;
+    const g = edgeFace.get(k);
+    if (g === undefined) edgeFace.set(k, 3 * f + e);
+    else if (g >= 0) { nb[3 * f + e] = (g / 3) | 0; nb[g] = f; edgeFace.set(k, -1); }
+  }
+  // grow charts
+  const chart = new Int32Array(nf).fill(-1), charts = [];
+  for (let s = 0; s < nf; s++) {
+    if (chart[s] >= 0) continue;
+    const id = charts.length, faces = [s]; chart[s] = id;
+    for (let q = 0; q < faces.length; q++) {
+      const f = faces[q];
+      for (let e = 0; e < 3; e++) { const g = nb[3 * f + e]; if (g >= 0 && chart[g] < 0 && label[g] === label[s]) { chart[g] = id; faces.push(g); } }
+    }
+    charts.push({ faces, axis: label[s] });
+  }
+  // project each chart; one uv per (chart, vertex)
+  const uv = [], fuv = new Uint32Array(3 * nf), local = new Map();
+  for (const ch of charts) {
+    const ax = ch.axis >> 1, flip = ch.axis & 1, iu = ax === 0 ? 1 : 0, iv = ax === 2 ? 1 : 2;
+    const sgn = (ax === 1 ? -1 : 1) * (flip ? -1 : 1); // keep every chart facing the same way round
+    local.clear(); ch.start = uv.length / 2;
+    let u0 = Infinity, v0 = Infinity, u1 = -Infinity, v1 = -Infinity;
+    for (const f of ch.faces) for (let k = 0; k < 3; k++) {
+      const v = idx[3 * f + k];
+      let t = local.get(v);
+      if (t === undefined) {
+        t = uv.length / 2; local.set(v, t);
+        const u = sgn * pos[3 * v + iu], w = pos[3 * v + iv];
+        uv.push(u, w); if (u < u0) u0 = u; if (u > u1) u1 = u; if (w < v0) v0 = w; if (w > v1) v1 = w;
+      }
+      fuv[3 * f + k] = t;
+    }
+    ch.end = uv.length / 2; ch.u0 = u0; ch.v0 = v0; ch.w = u1 - u0; ch.h = v1 - v0;
+  }
+  // shelf-pack the chart boxes, tallest first
+  let area = 0; for (const ch of charts) area += (ch.w + 1e-6) * (ch.h + 1e-6);
+  const pad = Math.sqrt(area) / 512, side = Math.sqrt(area) * 1.15;
+  const order = charts.slice().sort((a, b) => b.h - a.h);
+  let x = pad, y = pad, rowH = 0, W = 0;
+  for (const ch of order) {
+    if (x + ch.w + pad > side && x > pad) { x = pad; y += rowH + pad; rowH = 0; }
+    ch.px = x; ch.py = y; x += ch.w + pad; if (ch.h > rowH) rowH = ch.h; if (x > W) W = x;
+  }
+  const S = Math.max(W, y + rowH + pad), out = new Float32Array(uv.length);
+  for (const ch of charts) for (let t = ch.start; t < ch.end; t++) {
+    out[2 * t] = (uv[2 * t] - ch.u0 + ch.px) / S; out[2 * t + 1] = (uv[2 * t + 1] - ch.v0 + ch.py) / S;
+  }
+  return { uv: out, fuv, charts: charts.length };
+}
 function toOBJ(m, name) {
-  const { pos, idx } = m, lines = ['# ' + name + ' — exported by Print Bench', '# units: mm, Z up', 'o ' + name.replace(/\s+/g, '_')];
+  const { pos, idx } = m, { uv, fuv } = uvUnwrap(m), lines = ['# ' + name + ' — exported by Print Bench', '# units: mm, Z up', 'o ' + name.replace(/\s+/g, '_')];
   for (let i = 0; i < pos.length; i += 3) lines.push('v ' + +pos[i].toFixed(5) + ' ' + +pos[i + 1].toFixed(5) + ' ' + +pos[i + 2].toFixed(5));
-  for (let f = 0; f < idx.length; f += 3) lines.push('f ' + (idx[f] + 1) + ' ' + (idx[f + 1] + 1) + ' ' + (idx[f + 2] + 1));
+  for (let i = 0; i < uv.length; i += 2) lines.push('vt ' + +uv[i].toFixed(6) + ' ' + +uv[i + 1].toFixed(6));
+  for (let f = 0; f < idx.length; f += 3) lines.push('f ' + (idx[f] + 1) + '/' + (fuv[f] + 1) + ' ' + (idx[f + 1] + 1) + '/' + (fuv[f + 1] + 1) + ' ' + (idx[f + 2] + 1) + '/' + (fuv[f + 2] + 1));
   return new TextEncoder().encode(lines.join('\n') + '\n');
 }
 // ================= model library (IndexedDB, on this device) =================

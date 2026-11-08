@@ -1,5 +1,5 @@
 // Offline support for Print Bench. Bump VERSION whenever any app file changes.
-const VERSION = 'print-bench-v5';
+const VERSION = 'print-bench-v6';
 const FONTS = 'print-bench-fonts';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest',
